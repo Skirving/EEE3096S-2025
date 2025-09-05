@@ -23,6 +23,10 @@
 /* USER CODE BEGIN Includes */
 #include <stdint.h>
 #include "stm32f0xx.h"
+// using this library
+//#include <stdlib.h> ASK TUTOR if can include this
+#include <stdlib.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,6 +50,66 @@ TIM_HandleTypeDef htim16;
 /* USER CODE BEGIN PV */
 // TODO: Define input variables
 
+// Mode tracking ADDED
+//uint8_t current_mode = 0;
+uint8_t led_position = 0;
+int8_t direction = 1;
+
+uint8_t sparkle_state = 0;         // 0 = generate pattern, 1 = start turning off
+uint8_t sparkle_pattern = 0;
+uint8_t sparkle_index = 0;
+uint8_t sparkle_counter = 0;
+uint32_t sparkle_timestamp = 0;
+uint32_t sparkle_delay = 0;
+uint32_t sparkle_hold_end_time = 0;  // Time when the hold period ends
+uint8_t sparkle_off_delay = 0;       // Delay between turning off LEDs (100-150ms)
+uint32_t last_off_time = 0;          // Last time an LED was turned off
+uint8_t leds_to_turn_off = 0;
+
+
+uint8_t toggle_delay_flag = 0;
+uint8_t prev_button_state = 1; // Assume unpressed at start
+
+// Timer delay tracking
+//uint16_t current_delay_ms = 1000;
+
+
+
+// --- Number of modes ---
+const uint8_t num_modes = 3;
+
+// --- Mode 1: left to right and back ---
+const uint8_t mode1_pattern[] = {
+    0b00000001, 0b00000010, 0b00000100, 0b00001000,
+    0b00010000, 0b00100000, 0b01000000, 0b10000000,
+    0b01000000, 0b00100000, 0b00010000, 0b00001000,
+	0b00000100, 0b00000010
+};
+const uint8_t mode1_length = sizeof(mode1_pattern);
+
+// --- Mode 2: inverse of mode 1 ---
+const uint8_t mode2_pattern[] = {
+    0b11111110, 0b11111101, 0b11111011, 0b11110111,
+    0b11101111, 0b11011111, 0b10111111, 0b01111111,
+    0b10111111, 0b11011111, 0b11101111, 0b11110111,
+	0b11111011, 0b11111101,
+};
+const uint8_t mode2_length = sizeof(mode2_pattern);
+
+// --- Mode 3: Sparkle ---
+/*uint8_t current_led_state = 0b00000000;
+uint8_t random_led_target = 0b00000000;
+uint8_t random_state_step = 0;
+uint32_t random_hold_counter = 0;*/
+//uint8_t sparkle_pattern = 0;
+uint8_t sparkle_phase = 0;           // 0 = hold, 1 = turning off
+uint8_t sparkle_off_index = 0;       // which LED to turn off
+uint16_t sparkle_hold_delay = 1000;  // random hold delay
+uint8_t counter = 0;
+
+// --- Shared state variables ---
+uint8_t current_mode = 0;         // 1 = mode1, 2 = mode2, 3 = sparkle
+uint8_t current_pattern_index = 0;
 
 /* USER CODE END PV */
 
@@ -93,7 +157,7 @@ int main(void)
 
   // TODO: Start timer TIM16
 
- 
+  HAL_TIM_Base_Start_IT(&htim16);
 
   /* USER CODE END 2 */
 
@@ -108,12 +172,111 @@ int main(void)
 
     // TODO: Check pushbuttons to change timer delay
 
+	  uint8_t current_state = LL_GPIO_IsInputPinSet(GPIOA, LL_GPIO_PIN_0);
+	  if (prev_button_state == 1 && current_state == 0) // falling edge: pressed
+	  {
+		  HAL_Delay(50);  // debounce delay
 
-    
+		  current_state = LL_GPIO_IsInputPinSet(GPIOA, LL_GPIO_PIN_0);
+		  if (current_state == 0)
+		  {
+			  // Toggle the delay flag
+			  toggle_delay_flag ^= 1;
 
-  }
+			  // Update ARR value depending on delay
+			  if (toggle_delay_flag == 0)
+			  {
+				  __HAL_TIM_SET_AUTORELOAD(&htim16, 1000 - 1);  // 1 second
+			  }
+			  else
+			  {
+				  __HAL_TIM_SET_AUTORELOAD(&htim16, 500 - 1);   // 0.5 second
+			  }
+
+			  // Re-initialize the counter to apply the new period immediately
+			  __HAL_TIM_SET_COUNTER(&htim16, 0);
+
+			  // Wait for button to be released (avoid multiple toggles)
+			  while (LL_GPIO_IsInputPinSet(GPIOA, LL_GPIO_PIN_0) == 0);
+			  HAL_Delay(50);  // debounce release
+		  }
+
+	  }
+	  prev_button_state = current_state;
+
+
+	  // Check for Mode buttons (active-low logic)
+	  if (LL_GPIO_IsInputPinSet(GPIOA, LL_GPIO_PIN_1) == 0) {
+		  current_mode = 1;
+	  } else if (LL_GPIO_IsInputPinSet(GPIOA, LL_GPIO_PIN_2) == 0) {
+		  current_mode = 2;
+	  } else if (LL_GPIO_IsInputPinSet(GPIOA, LL_GPIO_PIN_3) == 0) {
+		  current_mode = 3;
+	  }
+
+	  // Execute current LED pattern
+	  if (current_mode == 1) {
+		  // Mode 1: Single LED moving back and forth
+		  HAL_GPIO_WritePin(GPIOB, 0xFF, GPIO_PIN_RESET);
+		  HAL_GPIO_WritePin(GPIOB, (1 << led_position), GPIO_PIN_SET);
+
+		  led_position += direction;
+		  if (led_position >= 7) direction = -1;
+		  else if (led_position <= 0) direction = 1;
+	  }
+
+	  else if (current_mode == 2) {
+		  // Mode 2: All LEDs ON except one
+		  HAL_GPIO_WritePin(GPIOB, 0xFF, GPIO_PIN_SET);
+		  HAL_GPIO_WritePin(GPIOB, (1 << led_position), GPIO_PIN_RESET);
+
+		  led_position += direction;
+		  if (led_position >= 7) direction = -1;
+		  else if (led_position <= 0) direction = 1;
+	  }
+
+	  //Attempt5
+	  else if (current_mode == 3) {
+	      uint32_t current_time = HAL_GetTick();
+
+	      if (sparkle_pattern == 0) {
+	          // Initialize new pattern
+	          sparkle_pattern = rand() % 256;
+	          HAL_GPIO_WritePin(GPIOB, sparkle_pattern, GPIO_PIN_SET);
+	          leds_to_turn_off = sparkle_pattern;
+	          next_arr_value = (rand() % 51) + 100;  // First delay: 100–150ms
+	          __HAL_TIM_SET_AUTORELOAD(&htim16, next_arr_value - 1);
+	          __HAL_TIM_SET_COUNTER(&htim16, 0);
+	      }
+	      else if (current_time - last_mode3_tick >= next_arr_value) {
+	          // Turn off next LED
+	          for (uint8_t i = 0; i < 8; i++) {
+	              if ((leds_to_turn_off >> i) & 0x01) {
+	                  HAL_GPIO_WritePin(GPIOB, (1 << i), GPIO_PIN_RESET);
+	                  leds_to_turn_off &= ~(1 << i);
+	                  next_arr_value = (rand() % 51) + 100;  // New delay
+	                  __HAL_TIM_SET_AUTORELOAD(&htim16, next_arr_value - 1);
+	                  __HAL_TIM_SET_COUNTER(&htim16, 0);
+	                  last_mode3_tick = current_time;
+	                  break;
+	              }
+	          }
+
+	          // Reset if all LEDs are off
+	          if (leds_to_turn_off == 0) sparkle_pattern = 0;
+	      }
+	  }
+
+
+
+
   /* USER CODE END 3 */
 }
+
+  void SystemDelay(void)
+  {
+	  HAL_Delay(50 + rand() % 101);
+  }
 
 /**
   * @brief System Clock Configuration
@@ -323,7 +486,11 @@ void TIM16_IRQHandler(void)
 
 	// TODO: Change LED pattern
 
+	// second attmpt
 
+	// Added the following
+
+	 HAL_TIM_IRQHandler(&htim16);
 
 }
 
